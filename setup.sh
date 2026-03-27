@@ -86,11 +86,24 @@ banner() {
 # Helpers
 # ============================================================
 
-# Detect sudo/doas — script runs as normal user, elevates as needed.
+# Read a line from user, handling curl|bash pipe mode via /dev/tty.
+# Result is stored in the variable named by $1.
+# shellcheck disable=SC2229  # Indirect variable name is intentional
+read_tty() {
+    local _var="$1"
+    if [[ -t 0 ]]; then
+        IFS= read -r "$_var"
+    elif [[ -e /dev/tty ]]; then
+        IFS= read -r "$_var" < /dev/tty
+    else
+        printf -v "$_var" ''
+    fi
+}
+
 setup_sudo() {
     SUDO=""
     if [[ "$(id -u)" -eq 0 ]]; then
-        SUDO=""
+        : # already root
     elif command -v sudo >/dev/null 2>&1; then
         SUDO="sudo"
     elif command -v doas >/dev/null 2>&1; then
@@ -111,14 +124,7 @@ confirm() {
     if [[ "$default" == "y" ]]; then prompt="[Y/n]"; else prompt="[y/N]"; fi
     printf "  ${YELLOW}?${NC} %s %s " "$msg" "$prompt"
     local answer
-    # Handle curl|bash: read from /dev/tty if stdin is not a terminal
-    if [[ -t 0 ]]; then
-        read -r answer
-    elif [[ -e /dev/tty ]]; then
-        read -r answer < /dev/tty
-    else
-        answer=""
-    fi
+    read_tty answer
     answer="${answer:-$default}"
     [[ "${answer,,}" == "y" || "${answer,,}" == "yes" ]]
 }
@@ -147,9 +153,17 @@ check_distro() {
     DISTRO_NAME="${PRETTY_NAME:-${ID} ${VERSION_ID:-}}"
 }
 
-# Detect if systemd is the init system.
+# Detect if systemd is the init system (cached).
+_SYSTEMD=""
 has_systemd() {
-    [[ "$(cat /proc/1/comm 2>/dev/null)" == "systemd" ]]
+    if [[ -z "$_SYSTEMD" ]]; then
+        if [[ "$(cat /proc/1/comm 2>/dev/null)" == "systemd" ]]; then
+            _SYSTEMD=1
+        else
+            _SYSTEMD=0
+        fi
+    fi
+    [[ "$_SYSTEMD" -eq 1 ]]
 }
 
 # Get the current (non-root) user.
@@ -329,16 +343,8 @@ install_tailscale() {
 harden_ssh() {
     step "3/7" "SSH hardening"
 
-    # Ensure drop-in directory exists (OpenSSH 8.2+)
-    if [[ ! -d /etc/ssh/sshd_config.d ]]; then
-        $SUDO mkdir -p /etc/ssh/sshd_config.d
-        # Ensure main sshd_config includes the drop-in directory
-        if ! grep -q "^Include /etc/ssh/sshd_config.d/" /etc/ssh/sshd_config 2>/dev/null; then
-            $SUDO sed -i '1i Include /etc/ssh/sshd_config.d/*.conf' /etc/ssh/sshd_config
-        fi
-    fi
-
-    # Ensure main config has Include directive
+    # Ensure drop-in directory and Include directive exist (OpenSSH 8.2+)
+    $SUDO mkdir -p /etc/ssh/sshd_config.d
     if ! grep -q "^Include /etc/ssh/sshd_config.d/" /etc/ssh/sshd_config 2>/dev/null; then
         $SUDO sed -i '1i Include /etc/ssh/sshd_config.d/*.conf' /etc/ssh/sshd_config
     fi
@@ -421,7 +427,6 @@ setup_ssh_keys() {
         touch "$auth_keys"
     fi
     chmod 600 "$auth_keys"
-    chown -R "${TARGET_USER}:${TARGET_USER}" "$ssh_dir" 2>/dev/null || true
 
     local keys_added=0
 
@@ -480,11 +485,7 @@ setup_ssh_keys() {
         echo ""
         local choice=""
         printf "  ${YELLOW}?${NC} Choose [1/2/3]: "
-        if [[ -t 0 ]]; then
-            read -r choice
-        elif [[ -e /dev/tty ]]; then
-            read -r choice < /dev/tty
-        fi
+        read_tty choice
         choice="${choice:-1}"
 
         case "$choice" in
@@ -495,11 +496,7 @@ setup_ssh_keys() {
             2)
                 printf "\n  ${YELLOW}?${NC} Paste your public key (ssh-ed25519 AAAA... or ssh-rsa AAAA...):\n  "
                 local pasted_key=""
-                if [[ -t 0 ]]; then
-                    read -r pasted_key
-                elif [[ -e /dev/tty ]]; then
-                    read -r pasted_key < /dev/tty
-                fi
+                read_tty pasted_key
                 if [[ "$pasted_key" == ssh-* ]]; then
                     echo "$pasted_key" >> "$auth_keys"
                     info "Public key added"
@@ -631,8 +628,7 @@ start_services() {
 
         # Verify authentication succeeded
         ts_state=$(tailscale status --json 2>/dev/null \
-            | grep -o '"BackendState":"[^"]*"' \
-            | cut -d'"' -f4 || echo "unknown")
+            | grep -oP '"BackendState"\s*:\s*"\K[^"]+' || echo "unknown")
 
         if [[ "$ts_state" == "Running" ]]; then
             TAILSCALE_IP=$(tailscale ip -4 2>/dev/null || echo "")
