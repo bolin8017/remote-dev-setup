@@ -1,0 +1,11 @@
+# Add this block to ~/.ssh/config on your client machine.
+# Replace <TAILSCALE_IP> and <USERNAME> with actual values shown after setup.
+
+Host wsl-dev
+    HostName <TAILSCALE_IP>
+    User <USERNAME>
+    Port 22
+    IdentityFile ~/.ssh/id_ed25519
+    ForwardAgent yes
+    ServerAliveInterval 60
+    ServerAliveCountMax 3
